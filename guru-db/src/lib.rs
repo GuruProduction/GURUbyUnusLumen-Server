@@ -4,7 +4,8 @@
 //! runner, and typed repositories for the content catalog. There are no user
 //! tables in this layer — that is a permanent design property, not a TODO.
 
-use sqlx::{migrate::MigrateDatabase, postgres::PgPoolOptions, PgPool, Postgres};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Row};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -22,16 +23,49 @@ pub async fn migrate(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
 }
 
 /// Create the target database if it does not already exist.
+///
+/// You cannot connect to a database that does not exist, so the existence
+/// check and CREATE both run through a single-connection pool to the
+/// "postgres" maintenance database on the same server. The database name is
+/// bound as a parameter everywhere it touches SQL.
 pub async fn create_database_if_missing(database_url: &str) -> Result<(), sqlx::Error> {
-    let url = connection_url_without_db(database_url);
     let db_name = database_name(database_url)?;
+    let admin_url = admin_url_for(database_url);
 
-    if !Postgres::database_exists(&url).await.unwrap_or(false) {
-        info!(db = %db_name, "creating database");
-        Postgres::create_database(&url).await?;
-    } else {
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&admin_url)
+        .await?;
+
+    let exists: bool = sqlx::query("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+        .bind(&db_name)
+        .fetch_one(&admin)
+        .await?
+        .get::<bool, _>(0);
+
+    if exists {
         info!(db = %db_name, "database already exists");
+        return Ok(());
     }
+
+    // Identifier for CREATE DATABASE cannot be parameter-bound; validate the
+    // name shape before interpolating it.
+    if db_name.is_empty()
+        || !db_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || db_name.starts_with(|c: char| c.is_ascii_digit())
+    {
+        return Err(sqlx::Error::Configuration(
+            format!("unsafe database name: {db_name}").into(),
+        ));
+    }
+
+    info!(db = %db_name, "creating database");
+    sqlx::query(&format!("CREATE DATABASE {db_name}"))
+        .execute(&admin)
+        .await?;
+    admin.close().await;
     Ok(())
 }
 
@@ -58,10 +92,12 @@ pub async fn setup_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     Ok(pool)
 }
 
-fn connection_url_without_db(url: &str) -> String {
-    match url.rfind('/') {
-        Some(i) => url[..i].to_string(),
-        None => url.to_string(),
+/// postgresql://user@host:port/target -> postgresql://user@host:port/postgres
+fn admin_url_for(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(i) => format!("{}/postgres", &trimmed[..i]),
+        None => format!("{trimmed}/postgres"),
     }
 }
 

@@ -86,6 +86,34 @@ fn valid_slug(slug: &str) -> bool {
         && !slug.contains("--")
 }
 
+/// Recursively check a parsed payload for key names that indicate personal
+/// data. Matched case-insensitively and on substring, because authors can be
+/// creative ("contact_email", "userPhone").
+fn contains_pii_keys(value: &Value) -> bool {
+    const BANNED: [&str; 8] = [
+        "email", "phone", "address", "password", "account", "ssn", "ip_address", "user_id",
+    ];
+    fn walk(value: &Value, banned: &[&str]) -> bool {
+        match value {
+            Value::Object(map) => {
+                for (key, inner) in map {
+                    let lower = key.to_lowercase();
+                    if banned.iter().any(|b| lower.contains(b)) {
+                        return true;
+                    }
+                    if walk(inner, banned) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Value::Array(items) => items.iter().any(|item| walk(item, banned)),
+            _ => false,
+        }
+    }
+    walk(value, &BANNED)
+}
+
 // ---------------------------------------------------------------------------
 // submission (public, unauthenticated, no PII)
 // ---------------------------------------------------------------------------
@@ -128,10 +156,10 @@ async fn create_submission(
         return bad_request("payload missing 'name'").into_response();
     };
 
-    // PII guard: reject obvious email/phone fields anywhere in the payload.
-    let payload_text = body.as_ref();
-    if payload_text.windows(9).any(|w| w == b"\"email\":") || payload_text.windows(3).any(|w| w == b"@gmail" )
-    {
+    // PII guard: walk the parsed JSON keys. No email, phone, address or
+    // account fields anywhere in the payload — submissions must stay
+    // publishable-only, no exceptions.
+    if contains_pii_keys(&payload) {
         return bad_request(
             "submissions must not contain personal fields; keep them publishable-only",
         )
