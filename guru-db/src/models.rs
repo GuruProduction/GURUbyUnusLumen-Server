@@ -122,6 +122,7 @@ pub struct CanvasElement {
     pub media_mime: Option<String>,
     pub media_bytes: Option<i64>,
     pub checksum: String,
+    pub is_active: bool,
     pub created_at: DateTime<Utc>,
 }
 

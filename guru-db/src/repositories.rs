@@ -274,9 +274,9 @@ impl ContentRepository {
         sqlx::query_as::<_, CanvasElement>(
             r#"
             SELECT id, pack_id, sort_order, element_type, name, text_content, script,
-                   media_path, media_mime, media_bytes, checksum, created_at
+                   media_path, media_mime, media_bytes, checksum, is_active, created_at
             FROM canvas_elements
-            WHERE pack_id = $1
+            WHERE pack_id = $1 AND is_active
             ORDER BY sort_order
             "#,
         )
@@ -289,7 +289,7 @@ impl ContentRepository {
         sqlx::query_as::<_, CanvasElement>(
             r#"
             SELECT id, pack_id, sort_order, element_type, name, text_content, script,
-                   media_path, media_mime, media_bytes, checksum, created_at
+                   media_path, media_mime, media_bytes, checksum, is_active, created_at
             FROM canvas_elements
             WHERE id = $1
             "#,
@@ -307,6 +307,277 @@ impl ContentRepository {
         )
         .fetch_all(&self.pool)
         .await
+    }
+
+    // -- master edits -----------------------------------------------------------
+
+    pub async fn update_skill(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: &str,
+        when_to_use: &str,
+        allowed_tools: &Value,
+        content: &str,
+    ) -> SqlxResult<Skill> {
+        sqlx::query_as::<_, Skill>(
+            r#"
+            UPDATE skills
+            SET name = $2, description = $3, when_to_use = $4,
+                allowed_tools = $5, content = $6, version = version + 1, updated_at = now()
+            WHERE id = $1
+            RETURNING id, slug, name, description, when_to_use, allowed_tools, content,
+                      version, source, author_label, price_cents, is_active, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(when_to_use)
+        .bind(allowed_tools)
+        .bind(content)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn set_skill_active(&self, slug: &str, active: bool) -> SqlxResult<bool> {
+        let r = sqlx::query("UPDATE skills SET is_active = $2, updated_at = now() WHERE slug = $1")
+            .bind(slug)
+            .bind(active)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn update_tool(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: &str,
+        category: &str,
+        parameters: &Value,
+        permissions: &Value,
+        execution_location: &str,
+        code: &str,
+    ) -> SqlxResult<Tool> {
+        let checksum = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(code.as_bytes());
+            hex::encode(hasher.finalize())
+        };
+        sqlx::query_as::<_, Tool>(
+            r#"
+            UPDATE tools
+            SET name = $2, description = $3, category = $4, parameters = $5,
+                permissions = $6, execution_location = $7, code = $8, checksum = $9,
+                version = version + 1, updated_at = now()
+            WHERE id = $1
+            RETURNING id, slug, name, description, category, parameters, permissions,
+                      execution_location, code, checksum, version, source, author_label,
+                      price_cents, is_active, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(category)
+        .bind(parameters)
+        .bind(permissions)
+        .bind(execution_location)
+        .bind(code)
+        .bind(&checksum)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn set_tool_active(&self, slug: &str, active: bool) -> SqlxResult<bool> {
+        let r = sqlx::query("UPDATE tools SET is_active = $2, updated_at = now() WHERE slug = $1")
+            .bind(slug)
+            .bind(active)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn update_agent(
+        &self,
+        id: Uuid,
+        name: &str,
+        role_description: &str,
+        system_prompt: &str,
+        tool_permissions: &Value,
+    ) -> SqlxResult<Agent> {
+        sqlx::query_as::<_, Agent>(
+            r#"
+            UPDATE agents
+            SET name = $2, role_description = $3, system_prompt = $4,
+                tool_permissions = $5, updated_at = now()
+            WHERE id = $1
+            RETURNING id, slug, name, role_description, system_prompt, tool_permissions,
+                      wave, is_builtin, source, author_label, price_cents, is_active,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(role_description)
+        .bind(system_prompt)
+        .bind(tool_permissions)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn set_agent_active(&self, slug: &str, active: bool) -> SqlxResult<bool> {
+        let r = sqlx::query("UPDATE agents SET is_active = $2, updated_at = now() WHERE slug = $1")
+            .bind(slug)
+            .bind(active)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn set_prompt_active(&self, slug: &str, active: bool) -> SqlxResult<bool> {
+        let r = sqlx::query(
+            "UPDATE prompt_sections SET is_active = $2, updated_at = now() WHERE slug = $1",
+        )
+        .bind(slug)
+        .bind(active)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn update_pack(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: &str,
+        box_height_dp: i32,
+        max_elements: i32,
+        background_colour: Option<&str>,
+    ) -> SqlxResult<CanvasPack> {
+        sqlx::query_as::<_, CanvasPack>(
+            r#"
+            UPDATE canvas_packs
+            SET name = $2, description = $3, box_height_dp = $4, max_elements = $5,
+                background_colour = $6, version = version + 1, updated_at = now()
+            WHERE id = $1
+            RETURNING id, slug, name, description, box_height_dp, max_elements,
+                      background_colour, version, source, author_label, price_cents,
+                      is_active, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .bind(description)
+        .bind(box_height_dp)
+        .bind(max_elements)
+        .bind(background_colour)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn set_pack_active(&self, slug: &str, active: bool) -> SqlxResult<bool> {
+        let r = sqlx::query(
+            "UPDATE canvas_packs SET is_active = $2, updated_at = now() WHERE slug = $1",
+        )
+        .bind(slug)
+        .bind(active)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Replace the element list of a pack in one transaction. Elements carry
+    /// (sort_order, element_type, name, text_content, media_path). Existing
+    /// rows for the pack are deleted first — element identity is per-version.
+    /// is_active lives on the element row so hides are reversible.
+    pub async fn replace_pack_elements(
+        &self,
+        pack_id: Uuid,
+        elements: Vec<(i32, String, String, Option<String>, Option<String>)>,
+    ) -> SqlxResult<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE canvas_elements SET is_active = false WHERE pack_id = $1",
+        )
+        .bind(pack_id)
+        .execute(&mut *tx)
+        .await?;
+        for (sort_order, element_type, name, text_content, media_path) in elements {
+            sqlx::query(
+                r#"
+                INSERT INTO canvas_elements (id, pack_id, sort_order, element_type, name,
+                                              text_content, media_path, is_active)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(pack_id)
+            .bind(sort_order)
+            .bind(&element_type)
+            .bind(&name)
+            .bind(text_content)
+            .bind(media_path)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn update_pack_element(
+        &self,
+        id: Uuid,
+        sort_order: Option<i32>,
+        name: Option<&str>,
+        text_content: Option<&str>,
+        media_path: Option<&str>,
+    ) -> SqlxResult<bool> {
+        let r = sqlx::query(
+            r#"
+            UPDATE canvas_elements
+            SET sort_order = coalesce($2, sort_order),
+                name = coalesce($3, name),
+                text_content = coalesce($4, text_content),
+                media_path = coalesce($5, media_path)
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .bind(sort_order)
+        .bind(name)
+        .bind(text_content)
+        .bind(media_path)
+        .execute(&self.pool)
+        .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn set_pack_element_active(&self, id: Uuid, active: bool) -> SqlxResult<bool> {
+        let r = sqlx::query("UPDATE canvas_elements SET is_active = $2 WHERE id = $1")
+            .bind(id)
+            .bind(active)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn set_config(&self, key: &str, value: &Value) -> SqlxResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO config_defaults (key, value, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value, updated_at = now()
+            "#,
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     // -- community catalog inserts (promotion from approved submissions) -------

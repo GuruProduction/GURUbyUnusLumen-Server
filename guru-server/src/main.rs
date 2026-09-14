@@ -5,6 +5,7 @@
 //! PII. Run your own, or point GURU at ours.
 
 mod etag;
+mod master;
 mod public;
 mod review;
 mod state;
@@ -46,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let app = public::public_router()
         .merge(review::review_router())
+        .merge(master::master_router())
         .route("/health", axum::routing::get(health))
         .with_state(state);
 
