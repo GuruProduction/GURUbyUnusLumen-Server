@@ -1,16 +1,17 @@
 //! Master content surface — token-gated writes for Unus Lumen publishers.
 //!
-//! Everything the panel can edit flows through here: prompts, skills, tools,
-//! agents, canvas packs with elements, and config defaults. Content is never
-//! DELETEd — deactivation hides it from the public catalog while version
-//! history stays intact. Tokens are the same reviewer tokens as the review
-//! pipeline; one token concept on the whole server.
+//! Everything the panel can edit flows through here: prompts (with keyword
+//! injection config), skills, tools, agents, canvas packs with elements, and
+//! config defaults. Activation hides content from the public catalog;
+//! DELETE removes it from the database entirely — both are real, both are
+//! deliberate. Tokens are the same reviewer tokens as the review pipeline;
+//! one token concept on the whole server.
 
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -44,6 +45,14 @@ pub fn master_router() -> Router<AppState> {
         .route("/v1/master/tools/{slug}/activate/{active}", post(set_tool_active))
         .route("/v1/master/agents/{slug}/activate/{active}", post(set_agent_active))
         .route("/v1/master/packs/{slug}/activate/{active}", post(set_pack_active))
+        // hard deletes — gone from the database, version history included
+        .route("/v1/master/prompts/{slug}", delete(delete_prompt))
+        .route("/v1/master/skills/{slug}", delete(delete_skill))
+        .route("/v1/master/tools/{slug}", delete(delete_tool))
+        .route("/v1/master/agents/{slug}", delete(delete_agent))
+        .route("/v1/master/packs/{slug}", delete(delete_pack))
+        .route("/v1/master/packs/elements/{id}", delete(delete_pack_element))
+        .route("/v1/master/config/{key}", delete(delete_config))
 }
 
 // reuse the reviewer gate from the review module
@@ -107,10 +116,30 @@ async fn create_prompt(
         .get("delivery_mode")
         .and_then(|v| v.as_str())
         .unwrap_or("always");
+    let trigger_keywords: Vec<String> = payload
+        .get("trigger_keywords")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let match_threshold = payload.get("match_threshold").and_then(|v| v.as_f64());
 
     match state
         .content
-        .upsert_prompt(Uuid::new_v4(), &slug, category, &name, &content, delivery_mode)
+        .upsert_prompt(
+            Uuid::new_v4(),
+            &slug,
+            category,
+            &name,
+            &content,
+            delivery_mode,
+            &trigger_keywords,
+            match_threshold,
+        )
         .await
     {
         Ok(p) => (StatusCode::CREATED, Json(serde_json::to_value(p).unwrap())).into_response(),
@@ -143,6 +172,17 @@ async fn update_prompt_by_slug(
         .get("delivery_mode")
         .and_then(|v| v.as_str())
         .unwrap_or("always");
+    let trigger_keywords: Vec<String> = payload
+        .get("trigger_keywords")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let match_threshold = payload.get("match_threshold").and_then(|v| v.as_f64());
 
     // Resolve id from slug, then upsert (upsert handles both create-on-update paths).
     let existing = match state.content.get_prompt_by_slug(&slug).await {
@@ -156,7 +196,16 @@ async fn update_prompt_by_slug(
 
     match state
         .content
-        .upsert_prompt(existing.id, &slug, category, name, content, delivery_mode)
+        .upsert_prompt(
+            existing.id,
+            &slug,
+            category,
+            name,
+            content,
+            delivery_mode,
+            &trigger_keywords,
+            match_threshold,
+        )
         .await
     {
         Ok(p) => (StatusCode::OK, Json(serde_json::to_value(p).unwrap())).into_response(),
@@ -804,6 +853,137 @@ async fn set_pack_active(
         Ok(true) => (StatusCode::OK, format!("{slug} active={active}")).into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "no such pack").into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// hard deletes — real DELETEs, rows leave the database entirely
+// ---------------------------------------------------------------------------
+
+async fn delete_prompt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_token(&state, &headers).await {
+        return e.into_response();
+    }
+    match state.content.delete_prompt(&slug).await {
+        Ok(true) => (StatusCode::OK, format!("{slug} deleted — gone from the database"))
+            .into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such prompt").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "prompt delete failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+async fn delete_skill(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_token(&state, &headers).await {
+        return e.into_response();
+    }
+    match state.content.delete_skill(&slug).await {
+        Ok(true) => (StatusCode::OK, format!("{slug} deleted")).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such skill").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "skill delete failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+async fn delete_tool(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_token(&state, &headers).await {
+        return e.into_response();
+    }
+    match state.content.delete_tool(&slug).await {
+        Ok(true) => (StatusCode::OK, format!("{slug} deleted")).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such tool").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "tool delete failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+async fn delete_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_token(&state, &headers).await {
+        return e.into_response();
+    }
+    match state.content.delete_agent(&slug).await {
+        Ok(true) => (StatusCode::OK, format!("{slug} deleted")).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such agent").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "agent delete failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+async fn delete_pack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_token(&state, &headers).await {
+        return e.into_response();
+    }
+    match state.content.delete_pack(&slug).await {
+        Ok(true) => (StatusCode::OK, format!("{slug} and its elements deleted")).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such pack").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "pack delete failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+async fn delete_pack_element(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if let Err(e) = require_token(&state, &headers).await {
+        return e.into_response();
+    }
+    match state.content.delete_pack_element(id).await {
+        Ok(true) => (StatusCode::OK, format!("element {id} deleted")).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such element").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "element delete failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
+    }
+}
+
+async fn delete_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_token(&state, &headers).await {
+        return e.into_response();
+    }
+    match state.content.delete_config(&key).await {
+        Ok(true) => (StatusCode::OK, format!("config '{key}' deleted")).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such config key").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "config delete failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        }
     }
 }
 

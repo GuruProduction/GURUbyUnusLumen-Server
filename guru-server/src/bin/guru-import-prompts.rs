@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .await?;
 
     let legacy: Vec<LegacyPrompt> = sqlx::query_as(
-        "SELECT name, category, content, version, is_active, delivery_mode \
+        "SELECT name, category, content, version, is_active, delivery_mode, trigger_keywords, match_threshold \
          FROM master_prompts ORDER BY category, name",
     )
     .fetch_all(&source)
@@ -47,25 +47,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } else {
             "always"
         };
-        let mut row = None;
-        // upsert by slug: same section name updates in place, bumping version
-        for attempt in 0..1 {
-            let _ = attempt;
-            row = Some(
-                content
-                    .upsert_prompt(
-                        uuid::Uuid::new_v4(),
-                        &slug,
-                        &p.category,
-                        &p.name,
-                        &p.content,
-                        delivery,
-                    )
-                    .await
-                    .map_err(|e| format!("import {} failed: {e}", p.name))?,
-            );
-        }
-        let row = row.unwrap();
+        let row = content
+            .upsert_prompt(
+                uuid::Uuid::new_v4(),
+                &slug,
+                &p.category,
+                &p.name,
+                &p.content,
+                delivery,
+                &p.trigger_keywords,
+                p.match_threshold,
+            )
+            .await
+            .map_err(|e| format!("import {} failed: {e}", p.name))?;
         if !p.is_active {
             content.set_prompt_active(&row.slug, false).await?;
         }
@@ -82,10 +76,12 @@ struct LegacyPrompt {
     name: String,
     category: String,
     content: String,
-    version: i32,
     #[allow(dead_code)]
+    version: i32,
     is_active: bool,
     delivery_mode: String,
+    trigger_keywords: Vec<String>,
+    match_threshold: Option<f64>,
 }
 
 fn slugify(name: &str) -> String {

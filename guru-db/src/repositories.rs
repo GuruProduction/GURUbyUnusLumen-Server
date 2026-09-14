@@ -33,7 +33,8 @@ impl ContentRepository {
     pub async fn list_active_prompts(&self) -> SqlxResult<Vec<PromptSection>> {
         sqlx::query_as::<_, PromptSection>(
             r#"
-            SELECT id, slug, category, name, content, delivery_mode, is_active,
+            SELECT id, slug, category, name, content, delivery_mode, trigger_keywords,
+                   match_threshold, global_threshold, is_active,
                    version, created_at, updated_at
             FROM prompt_sections
             WHERE is_active
@@ -47,10 +48,11 @@ impl ContentRepository {
     pub async fn get_prompt_by_slug(&self, slug: &str) -> SqlxResult<Option<PromptSection>> {
         sqlx::query_as::<_, PromptSection>(
             r#"
-            SELECT id, slug, category, name, content, delivery_mode, is_active,
+            SELECT id, slug, category, name, content, delivery_mode, trigger_keywords,
+                   match_threshold, global_threshold, is_active,
                    version, created_at, updated_at
             FROM prompt_sections
-            WHERE slug = $1 AND is_active
+            WHERE slug = $1
             "#,
         )
         .bind(slug)
@@ -72,6 +74,7 @@ impl ContentRepository {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_prompt(
         &self,
         id: Uuid,
@@ -80,6 +83,8 @@ impl ContentRepository {
         name: &str,
         content: &str,
         delivery_mode: &str,
+        trigger_keywords: &[String],
+        match_threshold: Option<f64>,
     ) -> SqlxResult<PromptSection> {
         let mut tx = self.pool.begin().await?;
         let existing: Option<(Uuid, i32)> = sqlx::query_as(
@@ -95,9 +100,11 @@ impl ContentRepository {
                     r#"
                     UPDATE prompt_sections
                     SET name = $2, category = $3, content = $4, delivery_mode = $5,
+                        trigger_keywords = $6, match_threshold = $7,
                         version = version + 1, updated_at = now()
                     WHERE id = $1
                     RETURNING id, slug, category, name, content, delivery_mode,
+                              trigger_keywords, match_threshold, global_threshold,
                               is_active, version, created_at, updated_at
                     "#,
                 )
@@ -106,15 +113,19 @@ impl ContentRepository {
                 .bind(category)
                 .bind(content)
                 .bind(delivery_mode)
+                .bind(trigger_keywords)
+                .bind(match_threshold)
                 .fetch_one(&mut *tx)
                 .await?
             }
             None => {
                 sqlx::query_as::<_, PromptSection>(
                     r#"
-                    INSERT INTO prompt_sections (id, slug, category, name, content, delivery_mode)
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    INSERT INTO prompt_sections (id, slug, category, name, content, delivery_mode,
+                                                  trigger_keywords, match_threshold)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     RETURNING id, slug, category, name, content, delivery_mode,
+                              trigger_keywords, match_threshold, global_threshold,
                               is_active, version, created_at, updated_at
                     "#,
                 )
@@ -124,6 +135,8 @@ impl ContentRepository {
                 .bind(name)
                 .bind(content)
                 .bind(delivery_mode)
+                .bind(trigger_keywords)
+                .bind(match_threshold)
                 .fetch_one(&mut *tx)
                 .await?
             }
@@ -578,6 +591,82 @@ impl ContentRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    // -- hard deletes: rows leave the database, version history included -------
+
+    /// Delete a prompt and its entire version history in one transaction.
+    pub async fn delete_prompt(&self, slug: &str) -> SqlxResult<bool> {
+        let mut tx = self.pool.begin().await?;
+        let _r = sqlx::query("DELETE FROM prompt_versions WHERE prompt_id IN (SELECT id FROM prompt_sections WHERE slug = $1)")
+            .bind(slug)
+            .execute(&mut *tx)
+            .await?;
+        let rows = sqlx::query("DELETE FROM prompt_sections WHERE slug = $1")
+            .bind(slug)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = rows.rows_affected() > 0;
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn delete_skill(&self, slug: &str) -> SqlxResult<bool> {
+        let r = sqlx::query("DELETE FROM skills WHERE slug = $1")
+            .bind(slug)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn delete_tool(&self, slug: &str) -> SqlxResult<bool> {
+        let r = sqlx::query("DELETE FROM tools WHERE slug = $1")
+            .bind(slug)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn delete_agent(&self, slug: &str) -> SqlxResult<bool> {
+        let r = sqlx::query("DELETE FROM agents WHERE slug = $1")
+            .bind(slug)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    /// Delete a pack and all its elements in one transaction.
+    pub async fn delete_pack(&self, slug: &str) -> SqlxResult<bool> {
+        let mut tx = self.pool.begin().await?;
+        let _ = sqlx::query(
+            "DELETE FROM canvas_elements WHERE pack_id IN (SELECT id FROM canvas_packs WHERE slug = $1)",
+        )
+        .bind(slug)
+        .execute(&mut *tx)
+        .await?;
+        let rows = sqlx::query("DELETE FROM canvas_packs WHERE slug = $1")
+            .bind(slug)
+            .execute(&mut *tx)
+            .await?;
+        let deleted = rows.rows_affected() > 0;
+        tx.commit().await?;
+        Ok(deleted)
+    }
+
+    pub async fn delete_pack_element(&self, id: Uuid) -> SqlxResult<bool> {
+        let r = sqlx::query("DELETE FROM canvas_elements WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn delete_config(&self, key: &str) -> SqlxResult<bool> {
+        let r = sqlx::query("DELETE FROM config_defaults WHERE key = $1")
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(r.rows_affected() > 0)
     }
 
     // -- community catalog inserts (promotion from approved submissions) -------
