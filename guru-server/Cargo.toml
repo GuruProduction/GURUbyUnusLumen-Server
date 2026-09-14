@@ -1,0 +1,32 @@
+[package]
+name = "guru-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "GURU open server binary: public content API + community review pipeline. Publisher, not collector."
+
+[[bin]]
+name = "guru-server"
+path = "src/main.rs"
+
+[dependencies]
+guru-db = { path = "../guru-db" }
+guru-content = { path = "../guru-content" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

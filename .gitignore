@@ -1,0 +1,4 @@
+/target
+/content/_staging
+.env
+.DS_Store
